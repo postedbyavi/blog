@@ -1,0 +1,224 @@
+---
+title: "img_1.jpg was a liar and other things i learned scraping 1,468 tile PDFs"
+date: "2026-06-15"
+summary: "need a one or two line summary1:28 AMClaude responded: i automated my family's marble business catalog so i wouldn't have to touch a single printed PDF.i automated my family's marble business catalog so i wouldn't have to touch a single printed PDF. 1,468 products. one afternoon. and img_1.jpg was a liar."
+category: "essay"
+readTime: "6 min"
+tags:
+    - build-in-public
+    - summer
+    - systems
+    - markets
+    - ai
+---
+
+my family sells marble.
+
+has for decades. my dad knows every supplier by name, every finish by touch, can tell you the difference between a 60x120 GVT and a 60x120 full body vitrified tile in three seconds flat. the showroom has samples on every wall. the warehouse has slabs stacked ceiling-high. there's a guy whose entire job is to know where everything is.
+
+the catalog system, though. the catalog system is a folder of printed PDFs.
+
+i am not joking. a physical folder. laminated sheets. printed PDFs inside it. the kind of thing you'd see in a period drama set in 2004.
+
+i'm nineteen. i have access to Python. i was home for summer. this was not going to stand.
+
+---
+
+## the realization
+
+our supplier — sunhearrt — has a website. a real one. with all 1,468 products on it. every product has a page, and every page has a link to a PDF datasheet that looks exactly like this:
+
+```
+https://www.sunhearrt.com/sample_pdf.php?id=4738&name=BIRON-CEMENTO
+```
+
+i stared at that URL for maybe four seconds.
+
+sequential numeric IDs. predictable structure. a name parameter that matched the product exactly. this wasn't a website. this was a database wearing a website costume. and databases, if you're patient and slightly reckless, are very easy to talk to.
+
+i already had a CSV of all 1,468 products from an earlier scrape — names, sizes, finishes, URLs. so i had the list. i had the URL pattern. i had a free afternoon.
+
+i wrote a scraper.
+
+---
+
+## phase 1: download everything. make tea.
+
+the first script is simple to the point of being boring. loop through every row in the CSV. hit the PDF URL. save the file. move on.
+
+the folder structure, though — i thought about this for a while. the obvious approach is one folder per product:
+
+```
+products/
+├── ALMORE-WHITE-LUX/
+├── ASTRA-BLACK/
+├── BIRON-CEMENTO/
+```
+
+but that's not how a tile business thinks. a tile business thinks in sizes. a customer walks in and says _i need something for a 10x12 bathroom, large format_. they don't walk in and ask for ALMORE-WHITE-LUX specifically. so i grouped by tile size:
+
+```
+products/
+├── 80x240cm/
+│   ├── ALMORE-WHITE-LUX/
+│   ├── TORINO-SILK/
+├── 60x120cm (GVT)/
+│   ├── ASTRA-BLACK/
+│   ├── CARRARA-FROST/
+├── 30x60cm/
+│   ├── BIRON-CEMENTO/
+```
+
+now when someone needs a large format tile, you open one folder. this sounds obvious. it wasn't how it was organized before.
+
+the download script ran. i made tea. 1,468 PDFs, organized, sitting on disk. first phase done.
+
+---
+
+## phase 2: the PDFs contain multitudes
+
+here's the thing about PDFs that most people don't know: they're not documents. they're containers. inside every PDF is a collection of objects — text, fonts, and crucially, images — that the PDF renderer assembles into what you see on screen.
+
+PyMuPDF, a python library that i now have enormous affection for, lets you reach inside a PDF and pull those images out directly. the code looks like this:
+
+```python
+import fitz
+
+doc = fitz.open(pdf_path)
+
+for page_num in range(len(doc)):
+    page = doc[page_num]
+    for img_index, img in enumerate(page.get_images(full=True)):
+        xref = img[0]
+        base = doc.extract_image(xref)
+        image_bytes = base["image"]
+        with open(f"img_{img_index}.jpg", "wb") as f:
+            f.write(image_bytes)
+```
+
+four seconds of runtime per PDF. embedded tile image, embedded room mockup, extracted and saved. the product datasheet disassembled into its raw parts, clean and usable.
+
+i ran it across all 1,468 products. felt good about it. opened the first folder.
+
+---
+
+## the img_1.jpg incident
+
+```
+ALMORE-WHITE-LUX/
+    img_1.jpg
+    img_2.jpg
+    img_3.jpg
+```
+
+i opened img_1.jpg.
+
+supplier company logo.
+
+i opened the second folder.
+
+```
+ASTRA-BLACK/
+    img_1.jpg
+    img_2.jpg
+```
+
+img_1.jpg.
+
+supplier company logo.
+
+i opened a third folder. i already knew what i was going to find.
+
+here's what was happening: every PDF, before the tile image, before the mockup, before anything useful, had the supplier's logo embedded at the top of the page. small. maybe 200 pixels wide. and PyMuPDF, faithfully, extracted everything. no judgment. just doing its job.
+
+so across 1,468 folders, img_1.jpg was always the logo. always grinning at me. completely useless.
+
+the fix, once i thought about it for thirty seconds, was obvious. logos are small. tiles are not. every tile image is at least 1200 pixels wide. every mockup is wider still. logos are tiny — 200 pixels, maybe 300. so:
+
+```python
+base = doc.extract_image(xref)
+
+width = base["width"]
+height = base["height"]
+
+if width < 300 or height < 300:
+    continue
+```
+
+skip anything smaller than 300 pixels in either dimension. logos gone. QR codes gone. whatever other tiny garbage the PDF had in it, gone. every folder now starts with an actual image of an actual tile.
+
+i felt an unreasonable amount of satisfaction about this fix. four lines. 1,468 problems, dissolved.
+
+---
+
+## phase 3: the excel catalog
+
+now i had:
+
+```
+products/
+├── 80x240cm/
+│   ├── ALMORE-WHITE-LUX/
+│   │   ├── img_1.jpg   ← tile
+│   │   ├── img_2.jpg   ← mockup
+│   │   └── product.pdf
+```
+
+for every single product. the asset library existed. next step: make it usable for a human being who is not me.
+
+enter openpyxl. the script reads the CSV, loops through every product, finds the first extracted image in its folder, and embeds it as a thumbnail in column A of a spreadsheet. 70x70 pixels. one per row. the other columns: product name, size, finish, body type, stock.
+
+```python
+from openpyxl.drawing.image import Image
+
+img = Image(str(thumb_path))
+img.width = 70
+img.height = 70
+ws.add_image(img, f"A{row_num}")
+```
+
+the output is Master_Catalog.xlsx. 1,468 rows. every row has a thumbnail, a name, a size, a finish. you can filter by size and see every 60x120 GVT we carry. you can sort by finish. you can actually use it.
+
+it took one afternoon.
+
+---
+
+## what this is actually about
+
+the information was always there. publicly accessible. sitting on a website. every image, every spec, every product detail — all of it was technically available to anyone with a browser.
+
+the gap wasn't information. the gap was form.
+
+a printed PDF folder and a searchable thumbnail catalog contain the same data. but one of them you can use and one of them you laminate and put in a drawer and forget about. the entire value i created in an afternoon wasn't intelligence or insight or some breakthrough technical achievement. it was just: i took the data from the form it was in and put it in a form that's actually useful.
+
+that gap — between data existing and data being usable — is everywhere. every business that's been running for twenty years has some version of the printed PDF folder. the information is there. the form is wrong. and most of the time nobody touches it because nobody thinks it's their problem.
+
+i was home for the summer. i had Python. it was my problem now.
+
+---
+
+## the part where i connect this to something larger
+
+there's a blog post from 2003 that mark zuckerberg wrote the night he built facemash. he was documenting what he was doing in real time — the idea, the execution, the chaos — while it was happening. not a post-mortem. not a case study. a live record of someone doing something slightly reckless and finding out if it worked.
+
+i think about that a lot.
+
+the audacity to just do the thing — without asking permission, without a product brief, without a roadmap — is underrated as a skill. most people wait for institutional authorization to build something. they want a job title that says they're allowed to work on the problem. they want someone to tell them it's a good idea first.
+
+i built a catalog for my family's marble business in an afternoon because it bothered me that it didn't exist. no authorization. no roadmap. just: this is a bad system, i can see a better one, i have a free afternoon.
+
+that's the whole thing.
+
+---
+
+## what's next
+
+this is phase one of something larger i'm building around the family business — documenting what happens when you take a twenty-year-old manufacturing and retail operation and start applying actual technical thinking to it. supply chain, customer data, vendor relationships, pricing logic. there's a lot here.
+
+i'm calling it Stone & Signal. more soon.
+
+---
+
+_the marble was my dad's idea._
+
+_the catalog is mine._
